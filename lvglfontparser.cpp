@@ -94,24 +94,54 @@ bool LvglFontParser::parseCFile(const QString &content)
             return {line, col};
         };
 
-        // 先移除所有注释（保持位置信息用于错误报告）
+        // 创建位置映射：从去除注释后的位置映射到原始位置
+        // 这样可以在去除注释的字符串中提取数值（避免提取注释中的数字）
+        // 同时保持原始位置信息用于准确的行列号计算
+
         QString strWithoutComments = bitmapStr;
+        QVector<int> positionMap;  // positionMap[i] = 去除注释后位置i对应的原始位置
+        positionMap.reserve(bitmapStr.length());
 
-        // 移除块注释 /* ... */
-        strWithoutComments.replace(QRegularExpression(R"(\/\*.*?\*\/)"), " ");
+        // 标记注释位置
+        QVector<bool> isComment(bitmapStr.length(), false);
 
-        // 移除行注释 // ...
-        strWithoutComments.replace(QRegularExpression(R"(\/\/[^\n]*)"), " ");
+        // 标记块注释 /* ... */
+        QRegularExpression blockCommentRegex(R"(\/\*.*?\*\/)");
+        auto blockIt = blockCommentRegex.globalMatch(bitmapStr);
+        while (blockIt.hasNext()) {
+            auto match = blockIt.next();
+            for (int i = match.capturedStart(); i < match.capturedEnd(); i++) {
+                isComment[i] = true;
+            }
+        }
 
-        // 提取所有数值（十六进制、十进制、八进制）及其位置
-        // 注意：必须在原始 bitmapStr 中提取，以保持正确的位置信息
+        // 标记行注释 // ...
+        QRegularExpression lineCommentRegex(R"(\/\/[^\n]*)");
+        auto lineIt = lineCommentRegex.globalMatch(bitmapStr);
+        while (lineIt.hasNext()) {
+            auto match = lineIt.next();
+            for (int i = match.capturedStart(); i < match.capturedEnd(); i++) {
+                isComment[i] = true;
+            }
+        }
+
+        // 构建去除注释的字符串和位置映射
+        strWithoutComments.clear();
+        for (int i = 0; i < bitmapStr.length(); i++) {
+            if (!isComment[i]) {
+                strWithoutComments.append(bitmapStr[i]);
+                positionMap.append(i);  // 记录对应的原始位置
+            }
+        }
+
+        // 提取所有数值（从去除注释后的字符串，避免提取注释中的数字）
         QRegularExpression allNumberRegex(R"(\b(0x[0-9A-Fa-f]+|0[0-7]+|\d+)\b)");
-        auto allNumberIt = allNumberRegex.globalMatch(bitmapStr);  // 使用原始字符串
+        auto allNumberIt = allNumberRegex.globalMatch(strWithoutComments);
 
         struct NumberValue {
             QString value;
-            int startPos;
-            int endPos;
+            int startPos;  // 在原始字符串中的位置
+            int endPos;    // 在原始字符串中的位置
         };
         QVector<NumberValue> numberValues;
 
@@ -119,8 +149,9 @@ bool LvglFontParser::parseCFile(const QString &content)
             auto match = allNumberIt.next();
             NumberValue nv;
             nv.value = match.captured(0);
-            nv.startPos = match.capturedStart();  // 原始字符串中的位置
-            nv.endPos = match.capturedEnd();      // 原始字符串中的位置
+            // 映射回原始位置
+            nv.startPos = positionMap[match.capturedStart()];
+            nv.endPos = positionMap[match.capturedEnd() - 1] + 1;
             numberValues.append(nv);
         }
 
@@ -180,21 +211,22 @@ bool LvglFontParser::parseCFile(const QString &content)
         }
 
         // 检查相邻数值之间的分隔符
-        // 使用去除注释后的字符串来检查逗号，但使用原始位置来报告错误
         for (int i = 0; i < numberValues.size() - 1; i++) {
             const NumberValue& current = numberValues[i];
             const NumberValue& next = numberValues[i + 1];
 
-            // 获取两个值之间的内容（从原始字符串，包含注释）
+            // 获取两个值之间的内容（从原始字符串）
             QString betweenOriginal = bitmapStr.mid(current.endPos, next.startPos - current.endPos);
 
-            // 创建去除注释后的版本来统计逗号
-            QString betweenWithoutComments = betweenOriginal;
-            betweenWithoutComments.replace(QRegularExpression(R"(\/\*.*?\*\/)"), " ");
-            betweenWithoutComments.replace(QRegularExpression(R"(\/\/[^\n]*)"), " ");
+            // 去除注释后统计逗号
+            QString betweenCleaned = betweenOriginal;
+            // 移除块注释
+            betweenCleaned.replace(QRegularExpression(R"(\/\*.*?\*\/)"), " ");
+            // 移除行注释
+            betweenCleaned.replace(QRegularExpression(R"(\/\/[^\n]*)"), " ");
 
-            // 统计逗号数量（在去除注释后）
-            int commaCount = betweenWithoutComments.count(',');
+            // 统计逗号数量
+            int commaCount = betweenCleaned.count(',');
 
             if (commaCount == 0) {
                 // 缺少逗号
@@ -202,8 +234,8 @@ bool LvglFontParser::parseCFile(const QString &content)
                 auto lineCol2 = getLineCol(next.startPos);
 
                 qWarning() << "Format error: missing comma between values!";
-                qWarning() << "Between:" << current.value << "(line" << lineCol1.first << ", col" << lineCol1.second << ")";
-                qWarning() << "   and:" << next.value << "(line" << lineCol2.first << ", col" << lineCol2.second << ")";
+                qWarning() << "Between:" << current.value << "at line" << lineCol1.first << ", col" << lineCol1.second;
+                qWarning() << "   and:" << next.value << "at line" << lineCol2.first << ", col" << lineCol2.second;
 
                 // 显示原始内容（包含注释）
                 int start = qMax(0, current.startPos - 20);
@@ -225,8 +257,8 @@ bool LvglFontParser::parseCFile(const QString &content)
                 auto lineCol2 = getLineCol(next.startPos);
 
                 qWarning() << "Format error: multiple commas between values!";
-                qWarning() << "Between:" << current.value << "(line" << lineCol1.first << ", col" << lineCol1.second << ")";
-                qWarning() << "   and:" << next.value << "(line" << lineCol2.first << ", col" << lineCol2.second << ")";
+                qWarning() << "Between:" << current.value << "at line" << lineCol1.first << ", col" << lineCol1.second;
+                qWarning() << "   and:" << next.value << "at line" << lineCol2.first << ", col" << lineCol2.second;
                 qWarning() << "Found" << commaCount << "commas (expected 1)";
 
                 int start = qMax(0, current.startPos - 20);
