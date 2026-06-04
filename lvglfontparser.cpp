@@ -116,6 +116,28 @@ bool LvglFontParser::parseCFile(const QString &content)
             }
         }
 
+        // 检测缺少逗号的情况：十六进制值后面直接跟注释或换行，而不是逗号
+        // 匹配模式：0xXX 后面是空白+注释 或 空白+换行+注释（不是逗号）
+        QRegularExpression missingCommaRegex(R"(0x[0-9A-Fa-f]{1,2}\s*\n\s*\/\*)");
+        auto missingCommaMatch = missingCommaRegex.match(bitmapStr);
+        if (missingCommaMatch.hasMatch()) {
+            int pos = missingCommaMatch.capturedStart();
+            qWarning() << "Format error detected in glyph_bitmap array!";
+            qWarning() << "Found hex value without trailing comma before next element.";
+            qWarning() << "Position:" << pos;
+
+            // 显示周围的上下文
+            int start = qMax(0, pos - 30);
+            int len = qMin(80, bitmapStr.length() - start);
+            QString context = bitmapStr.mid(start, len);
+            qWarning() << "Context:" << context;
+
+            m_error = QString("Format error at position %1: missing comma after hex value.\n"
+                              "Each hex value must be followed by a comma, except the last one in the array.")
+                          .arg(pos);
+            return false;
+        }
+
         // 格式检查通过，正常解析
         QRegularExpression hexRegex(R"(0x([0-9A-Fa-f]{1,2}))");
         auto it = hexRegex.globalMatch(bitmapStr);
