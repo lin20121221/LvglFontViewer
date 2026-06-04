@@ -104,9 +104,9 @@ bool LvglFontParser::parseCFile(const QString &content)
         strWithoutComments.replace(QRegularExpression(R"(\/\/[^\n]*)"), " ");
 
         // 提取所有数值（十六进制、十进制、八进制）及其位置
-        // 支持：0x... (hex), 0... (octal), 数字 (decimal)
+        // 注意：必须在原始 bitmapStr 中提取，以保持正确的位置信息
         QRegularExpression allNumberRegex(R"(\b(0x[0-9A-Fa-f]+|0[0-7]+|\d+)\b)");
-        auto allNumberIt = allNumberRegex.globalMatch(strWithoutComments);
+        auto allNumberIt = allNumberRegex.globalMatch(bitmapStr);  // 使用原始字符串
 
         struct NumberValue {
             QString value;
@@ -119,8 +119,8 @@ bool LvglFontParser::parseCFile(const QString &content)
             auto match = allNumberIt.next();
             NumberValue nv;
             nv.value = match.captured(0);
-            nv.startPos = match.capturedStart();
-            nv.endPos = match.capturedEnd();
+            nv.startPos = match.capturedStart();  // 原始字符串中的位置
+            nv.endPos = match.capturedEnd();      // 原始字符串中的位置
             numberValues.append(nv);
         }
 
@@ -180,15 +180,21 @@ bool LvglFontParser::parseCFile(const QString &content)
         }
 
         // 检查相邻数值之间的分隔符
+        // 使用去除注释后的字符串来检查逗号，但使用原始位置来报告错误
         for (int i = 0; i < numberValues.size() - 1; i++) {
             const NumberValue& current = numberValues[i];
             const NumberValue& next = numberValues[i + 1];
 
-            // 获取两个值之间的内容（已移除注释）
-            QString between = strWithoutComments.mid(current.endPos, next.startPos - current.endPos);
+            // 获取两个值之间的内容（从原始字符串，包含注释）
+            QString betweenOriginal = bitmapStr.mid(current.endPos, next.startPos - current.endPos);
 
-            // 统计逗号数量
-            int commaCount = between.count(',');
+            // 创建去除注释后的版本来统计逗号
+            QString betweenWithoutComments = betweenOriginal;
+            betweenWithoutComments.replace(QRegularExpression(R"(\/\*.*?\*\/)"), " ");
+            betweenWithoutComments.replace(QRegularExpression(R"(\/\/[^\n]*)"), " ");
+
+            // 统计逗号数量（在去除注释后）
+            int commaCount = betweenWithoutComments.count(',');
 
             if (commaCount == 0) {
                 // 缺少逗号
