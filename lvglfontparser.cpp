@@ -77,68 +77,106 @@ bool LvglFontParser::parseCFile(const QString &content)
     if (bitmapMatch.hasMatch()) {
         QString bitmapStr = bitmapMatch.captured(1);
 
-        // 先检测所有十六进制值（包括格式错误的）
-        QRegularExpression allHexRegex(R"(0x[0-9A-Fa-f]+)");
-        auto allHexIt = allHexRegex.globalMatch(bitmapStr);
+        // 先移除所有注释（保持位置信息用于错误报告）
+        QString strWithoutComments = bitmapStr;
 
-        QVector<QPair<QString, int>> allHexValues;
+        // 移除块注释 /* ... */
+        strWithoutComments.replace(QRegularExpression(R"(\/\*.*?\*\/)"), " ");
+
+        // 移除行注释 // ...
+        strWithoutComments.replace(QRegularExpression(R"(\/\/[^\n]*)"), " ");
+
+        // 提取所有十六进制值及其位置
+        QRegularExpression allHexRegex(R"(0x[0-9A-Fa-f]+)");
+        auto allHexIt = allHexRegex.globalMatch(strWithoutComments);
+
+        struct HexValue {
+            QString value;
+            int startPos;
+            int endPos;
+        };
+        QVector<HexValue> hexValues;
+
         while (allHexIt.hasNext()) {
             auto match = allHexIt.next();
-            allHexValues.append({match.captured(0), match.capturedStart()});
+            HexValue hv;
+            hv.value = match.captured(0);
+            hv.startPos = match.capturedStart();
+            hv.endPos = match.capturedEnd();
+            hexValues.append(hv);
         }
 
-        // 验证每个十六进制值
-        for (const auto& hexPair : allHexValues) {
-            QString hexValue = hexPair.first;
-            int pos = hexPair.second;
+        // 验证每个十六进制值的长度
+        for (const auto& hv : hexValues) {
+            if (hv.value.length() > 4) {  // "0x" + 最多2位
+                qWarning() << "Format error: invalid hex value (too long):" << hv.value;
+                qWarning() << "Position:" << hv.startPos;
 
-            // 检查是否超过 2 位（0xFF 是最大值）
-            // "0x" + 最多2位 = 最长4个字符
-            if (hexValue.length() > 4) {
-                qWarning() << "Format error detected in glyph_bitmap array!";
-                qWarning() << "Found invalid hex value:" << hexValue;
-                qWarning() << "Hex values must be 0x00-0xFF (max 2 hex digits).";
-                qWarning() << "This usually means missing comma(s) between values.";
-                qWarning() << "Position:" << pos;
-
-                // 显示周围的上下文
-                int start = qMax(0, pos - 50);
-                int len = qMin(100, bitmapStr.length() - start);
+                int start = qMax(0, hv.startPos - 30);
+                int len = qMin(80, bitmapStr.length() - start);
                 QString context = bitmapStr.mid(start, len);
                 qWarning() << "Context:" << context;
 
                 m_error = QString("Format error: invalid hex value '%1' at position %2.\n"
-                                  "Hex values must be 0x00-0xFF (max 2 digits).\n"
-                                  "Check for missing commas between values.")
-                              .arg(hexValue)
-                              .arg(pos);
+                                  "Hex values must be 0x00-0xFF (max 2 hex digits).")
+                              .arg(hv.value)
+                              .arg(hv.startPos);
                 return false;
             }
         }
 
-        // 检测缺少逗号的情况：十六进制值后面直接跟注释或换行，而不是逗号
-        // 匹配模式：0xXX 后面是空白+注释 或 空白+换行+注释（不是逗号）
-        QRegularExpression missingCommaRegex(R"(0x[0-9A-Fa-f]{1,2}\s*\n\s*\/\*)");
-        auto missingCommaMatch = missingCommaRegex.match(bitmapStr);
-        if (missingCommaMatch.hasMatch()) {
-            int pos = missingCommaMatch.capturedStart();
-            qWarning() << "Format error detected in glyph_bitmap array!";
-            qWarning() << "Found hex value without trailing comma before next element.";
-            qWarning() << "Position:" << pos;
+        // 检查相邻十六进制值之间的分隔符
+        for (int i = 0; i < hexValues.size() - 1; i++) {
+            const HexValue& current = hexValues[i];
+            const HexValue& next = hexValues[i + 1];
 
-            // 显示周围的上下文
-            int start = qMax(0, pos - 30);
-            int len = qMin(80, bitmapStr.length() - start);
-            QString context = bitmapStr.mid(start, len);
-            qWarning() << "Context:" << context;
+            // 获取两个值之间的内容（已移除注释）
+            QString between = strWithoutComments.mid(current.endPos, next.startPos - current.endPos);
 
-            m_error = QString("Format error at position %1: missing comma after hex value.\n"
-                              "Each hex value must be followed by a comma, except the last one in the array.")
-                          .arg(pos);
-            return false;
+            // 统计逗号数量
+            int commaCount = between.count(',');
+
+            if (commaCount == 0) {
+                // 缺少逗号
+                qWarning() << "Format error: missing comma between hex values!";
+                qWarning() << "Between:" << current.value << "and" << next.value;
+                qWarning() << "Position:" << current.endPos << "to" << next.startPos;
+
+                // 显示原始内容（包含注释）
+                int start = qMax(0, current.startPos - 20);
+                int len = qMin(100, bitmapStr.length() - start);
+                QString context = bitmapStr.mid(start, len);
+                qWarning() << "Context:" << context;
+
+                m_error = QString("Format error at position %1: missing comma between '%2' and '%3'.\n"
+                                  "Each hex value must be separated by exactly one comma.")
+                              .arg(current.endPos)
+                              .arg(current.value)
+                              .arg(next.value);
+                return false;
+            } else if (commaCount > 1) {
+                // 多余的逗号
+                qWarning() << "Format error: multiple commas between hex values!";
+                qWarning() << "Between:" << current.value << "and" << next.value;
+                qWarning() << "Found" << commaCount << "commas (expected 1)";
+                qWarning() << "Position:" << current.endPos << "to" << next.startPos;
+
+                int start = qMax(0, current.startPos - 20);
+                int len = qMin(100, bitmapStr.length() - start);
+                QString context = bitmapStr.mid(start, len);
+                qWarning() << "Context:" << context;
+
+                m_error = QString("Format error at position %1: found %2 commas between '%3' and '%4' (expected 1).\n"
+                                  "Each hex value must be separated by exactly one comma.")
+                              .arg(current.endPos)
+                              .arg(commaCount)
+                              .arg(current.value)
+                              .arg(next.value);
+                return false;
+            }
         }
 
-        // 格式检查通过，正常解析
+        // 格式检查通过，正常解析（从原始字符串解析，不是去除注释的）
         QRegularExpression hexRegex(R"(0x([0-9A-Fa-f]{1,2}))");
         auto it = hexRegex.globalMatch(bitmapStr);
         int matchCount = 0;
@@ -150,10 +188,8 @@ bool LvglFontParser::parseCFile(const QString &content)
 
         qDebug() << "Bitmap data size:" << bitmapData.size() << "(" << matchCount << "values parsed)";
 
-        // 验证解析的数量是否与检测到的数量一致
-        if (matchCount != allHexValues.size()) {
-            qWarning() << "Warning: parsed" << matchCount << "values, but detected" << allHexValues.size() << "hex patterns.";
-            qWarning() << "This may indicate a parsing issue.";
+        if (matchCount != hexValues.size()) {
+            qWarning() << "Warning: parsed" << matchCount << "values, but detected" << hexValues.size() << "hex patterns.";
         }
     } else {
         qDebug() << "Bitmap array not found";
