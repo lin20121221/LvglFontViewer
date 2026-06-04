@@ -76,13 +76,15 @@ bool LvglFontParser::parseCFile(const QString &content)
     auto bitmapMatch = bitmapArrayRegex.match(content);
     if (bitmapMatch.hasMatch()) {
         QString bitmapStr = bitmapMatch.captured(1);
+        int bitmapStartPos = bitmapMatch.capturedStart(1);  // 数组内容在完整文件中的起始位置
 
-        // 辅助函数：将绝对位置转换为行号和列号
-        auto getLineCol = [&bitmapStr](int pos) -> QPair<int, int> {
+        // 辅助函数：将绝对位置转换为行号和列号（在完整文件中）
+        auto getLineCol = [&content, bitmapStartPos](int posInBitmap) -> QPair<int, int> {
+            int absolutePos = bitmapStartPos + posInBitmap;  // 转换为文件中的绝对位置
             int line = 1;
             int col = 1;
-            for (int i = 0; i < pos && i < bitmapStr.length(); i++) {
-                if (bitmapStr[i] == '\n') {
+            for (int i = 0; i < absolutePos && i < content.length(); i++) {
+                if (content[i] == '\n') {
                     line++;
                     col = 1;
                 } else {
