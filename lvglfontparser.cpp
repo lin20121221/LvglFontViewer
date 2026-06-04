@@ -77,6 +77,21 @@ bool LvglFontParser::parseCFile(const QString &content)
     if (bitmapMatch.hasMatch()) {
         QString bitmapStr = bitmapMatch.captured(1);
 
+        // 辅助函数：将绝对位置转换为行号和列号
+        auto getLineCol = [&bitmapStr](int pos) -> QPair<int, int> {
+            int line = 1;
+            int col = 1;
+            for (int i = 0; i < pos && i < bitmapStr.length(); i++) {
+                if (bitmapStr[i] == '\n') {
+                    line++;
+                    col = 1;
+                } else {
+                    col++;
+                }
+            }
+            return {line, col};
+        };
+
         // 先移除所有注释（保持位置信息用于错误报告）
         QString strWithoutComments = bitmapStr;
 
@@ -111,18 +126,20 @@ bool LvglFontParser::parseCFile(const QString &content)
         for (const auto& nv : numberValues) {
             if (nv.value.startsWith("0x", Qt::CaseInsensitive)) {
                 if (nv.value.length() > 4) {  // "0x" + 最多2位
+                    auto lineCol = getLineCol(nv.startPos);
                     qWarning() << "Format error: invalid hex value (too long):" << nv.value;
-                    qWarning() << "Position:" << nv.startPos;
+                    qWarning() << "Location: line" << lineCol.first << ", column" << lineCol.second;
 
                     int start = qMax(0, nv.startPos - 30);
                     int len = qMin(80, bitmapStr.length() - start);
                     QString context = bitmapStr.mid(start, len);
                     qWarning() << "Context:" << context;
 
-                    m_error = QString("Format error: invalid hex value '%1' at position %2.\n"
+                    m_error = QString("Format error: invalid hex value '%1' at line %2, column %3.\n"
                                       "Hex values must be 0x00-0xFF (max 2 hex digits).")
                                   .arg(nv.value)
-                                  .arg(nv.startPos);
+                                  .arg(lineCol.first)
+                                  .arg(lineCol.second);
                     return false;
                 }
 
@@ -130,9 +147,15 @@ bool LvglFontParser::parseCFile(const QString &content)
                 bool ok;
                 uint value = nv.value.mid(2).toUInt(&ok, 16);
                 if (!ok || value > 0xFF) {
+                    auto lineCol = getLineCol(nv.startPos);
                     qWarning() << "Format error: hex value out of range (0x00-0xFF):" << nv.value;
-                    m_error = QString("Format error: hex value '%1' out of range (must be 0x00-0xFF).")
-                                  .arg(nv.value);
+                    qWarning() << "Location: line" << lineCol.first << ", column" << lineCol.second;
+
+                    m_error = QString("Format error: hex value '%1' out of range at line %2, column %3.\n"
+                                      "Must be 0x00-0xFF.")
+                                  .arg(nv.value)
+                                  .arg(lineCol.first)
+                                  .arg(lineCol.second);
                     return false;
                 }
             } else {
@@ -140,9 +163,15 @@ bool LvglFontParser::parseCFile(const QString &content)
                 bool ok;
                 uint value = nv.value.toUInt(&ok, 0);  // 自动检测进制
                 if (!ok || value > 255) {
+                    auto lineCol = getLineCol(nv.startPos);
                     qWarning() << "Format error: value out of range (0-255):" << nv.value;
-                    m_error = QString("Format error: value '%1' out of range (must be 0-255).")
-                                  .arg(nv.value);
+                    qWarning() << "Location: line" << lineCol.first << ", column" << lineCol.second;
+
+                    m_error = QString("Format error: value '%1' out of range at line %2, column %3.\n"
+                                      "Must be 0-255.")
+                                  .arg(nv.value)
+                                  .arg(lineCol.first)
+                                  .arg(lineCol.second);
                     return false;
                 }
             }
@@ -161,9 +190,12 @@ bool LvglFontParser::parseCFile(const QString &content)
 
             if (commaCount == 0) {
                 // 缺少逗号
+                auto lineCol1 = getLineCol(current.endPos);
+                auto lineCol2 = getLineCol(next.startPos);
+
                 qWarning() << "Format error: missing comma between values!";
-                qWarning() << "Between:" << current.value << "and" << next.value;
-                qWarning() << "Position:" << current.endPos << "to" << next.startPos;
+                qWarning() << "Between:" << current.value << "(line" << lineCol1.first << ", col" << lineCol1.second << ")";
+                qWarning() << "   and:" << next.value << "(line" << lineCol2.first << ", col" << lineCol2.second << ")";
 
                 // 显示原始内容（包含注释）
                 int start = qMax(0, current.startPos - 20);
@@ -171,30 +203,37 @@ bool LvglFontParser::parseCFile(const QString &content)
                 QString context = bitmapStr.mid(start, len);
                 qWarning() << "Context:" << context;
 
-                m_error = QString("Format error at position %1: missing comma between '%2' and '%3'.\n"
+                m_error = QString("Format error: missing comma between '%1' and '%2'.\n"
+                                  "Location: after '%1' at line %3, column %4.\n"
                                   "Each value must be separated by exactly one comma.")
-                              .arg(current.endPos)
                               .arg(current.value)
-                              .arg(next.value);
+                              .arg(next.value)
+                              .arg(lineCol1.first)
+                              .arg(lineCol1.second);
                 return false;
             } else if (commaCount > 1) {
                 // 多余的逗号
+                auto lineCol1 = getLineCol(current.endPos);
+                auto lineCol2 = getLineCol(next.startPos);
+
                 qWarning() << "Format error: multiple commas between values!";
-                qWarning() << "Between:" << current.value << "and" << next.value;
+                qWarning() << "Between:" << current.value << "(line" << lineCol1.first << ", col" << lineCol1.second << ")";
+                qWarning() << "   and:" << next.value << "(line" << lineCol2.first << ", col" << lineCol2.second << ")";
                 qWarning() << "Found" << commaCount << "commas (expected 1)";
-                qWarning() << "Position:" << current.endPos << "to" << next.startPos;
 
                 int start = qMax(0, current.startPos - 20);
                 int len = qMin(100, bitmapStr.length() - start);
                 QString context = bitmapStr.mid(start, len);
                 qWarning() << "Context:" << context;
 
-                m_error = QString("Format error at position %1: found %2 commas between '%3' and '%4' (expected 1).\n"
+                m_error = QString("Format error: found %1 commas between '%2' and '%3' (expected 1).\n"
+                                  "Location: after '%2' at line %4, column %5.\n"
                                   "Each value must be separated by exactly one comma.")
-                              .arg(current.endPos)
                               .arg(commaCount)
                               .arg(current.value)
-                              .arg(next.value);
+                              .arg(next.value)
+                              .arg(lineCol1.first)
+                              .arg(lineCol1.second);
                 return false;
             }
         }
